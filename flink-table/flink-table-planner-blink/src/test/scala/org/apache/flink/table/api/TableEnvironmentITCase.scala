@@ -30,6 +30,7 @@ import org.apache.flink.table.api.config.TableConfigOptions
 import org.apache.flink.table.api.internal.{TableEnvironmentImpl, TableEnvironmentInternal}
 import org.apache.flink.table.catalog._
 import org.apache.flink.table.functions.TestGenericUDF
+import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.factories.utils.TestCollectionTableFactory
 import org.apache.flink.table.planner.runtime.utils.TestingAppendSink
 import org.apache.flink.table.planner.utils.TableTestUtil.{readFromResource, replaceStageId}
@@ -46,7 +47,7 @@ import org.junit.{Assert, Before, Rule, Test}
 import _root_.java.io.{File, FileFilter}
 import _root_.java.lang.{Long => JLong}
 import _root_.java.util
-
+import java.time.LocalDateTime
 import _root_.scala.collection.mutable
 
 @RunWith(classOf[Parameterized])
@@ -806,6 +807,50 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     tEnv.useCatalog(currentCat)
 
     listener.close()
+  }
+
+  @Test
+  def testLookupJoinWithCurrent_Date_filter(): Unit = {
+    val id1 = TestValuesTableFactory.registerData(
+      Seq(Row.of("abc", LocalDateTime.of(2000, 1, 1, 0, 0))))
+    val ddl1 =
+      s"""
+         |CREATE TABLE Ta (
+         |  id VARCHAR,
+         |  ts TIMESTAMP,
+         |  proc AS PROCTIME()
+         |) WITH (
+         |  'connector' = 'values',
+         |  'data-id' = '$id1',
+         |  'bounded' = 'true'
+         |)
+         |""".stripMargin
+    tEnv.executeSql(ddl1)
+
+    val id2 = TestValuesTableFactory.registerData(
+      Seq(Row.of("abc", LocalDateTime.of(2000, 1, 2, 0, 0))))
+    val ddl2 =
+      s"""
+         |CREATE TABLE Tb (
+         |  id VARCHAR,
+         |  ts TIMESTAMP
+         |) WITH (
+         |  'connector' = 'values',
+         |  'data-id' = '$id2',
+         |  'bounded' = 'true'
+         |)
+         |""".stripMargin
+    tEnv.executeSql(ddl2)
+
+    val it = tEnv.executeSql(
+      """
+        |SELECT * FROM Ta AS t1
+        |INNER JOIN Tb FOR SYSTEM_TIME AS OF t1.proc AS t2
+        |ON t1.id = t2.id
+        |WHERE CAST(coalesce(t1.ts, t2.ts) AS VARCHAR) >= CONCAT(CAST(CURRENT_DATE AS VARCHAR), ' 00:00:00')
+        |""".stripMargin).collect()
+
+    assertFalse(it.hasNext)
   }
 
   def getPersonData: List[(String, Int, Double, String)] = {
