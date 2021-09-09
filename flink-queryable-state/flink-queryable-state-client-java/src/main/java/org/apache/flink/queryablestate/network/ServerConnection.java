@@ -99,12 +99,11 @@ final class ServerConnection<REQ extends MessageBody, RESP extends MessageBody> 
     }
 
     CompletableFuture<Void> close() {
+        internalConnection.close();
         synchronized (connectionLock) {
             if (running) {
                 running = false;
-                internalConnection.close();
             }
-
             return closeFuture;
         }
     }
@@ -137,6 +136,7 @@ final class ServerConnection<REQ extends MessageBody, RESP extends MessageBody> 
     private static final class PendingConnection<REQ extends MessageBody, RESP extends MessageBody>
             implements InternalConnection<REQ, RESP> {
 
+        private final Object lock = new Object();
         private final String clientName;
 
         private final MessageSerializer<REQ, RESP> serializer;
@@ -152,7 +152,9 @@ final class ServerConnection<REQ extends MessageBody, RESP extends MessageBody> 
         /** Failure cause if something goes wrong. */
         @Nullable private Throwable failureCause = null;
 
-        private boolean running = true;
+        @GuardedBy("lock")
+        private volatile boolean running = true;
+
 
         /** Creates a pending connection to the given server. */
         private PendingConnection(
@@ -247,15 +249,21 @@ final class ServerConnection<REQ extends MessageBody, RESP extends MessageBody> 
          */
         private CompletableFuture<Void> close(Throwable cause) {
             if (running) {
-                running = false;
-                failureCause = cause;
+                synchronized (lock){
+                    if (!running) {
+                        return closeFuture;
+                    }
 
-                for (PendingConnection.PendingRequest<REQ, RESP> pendingRequest : queuedRequests) {
-                    pendingRequest.completeExceptionally(cause);
+                    running = false;
+                    failureCause = cause;
+
+                    for (PendingConnection.PendingRequest<REQ, RESP> pendingRequest : queuedRequests) {
+                        pendingRequest.completeExceptionally(cause);
+                    }
+                    queuedRequests.clear();
+
+                    closeFuture.completeExceptionally(cause);
                 }
-                queuedRequests.clear();
-
-                closeFuture.completeExceptionally(cause);
             }
 
             return closeFuture;
